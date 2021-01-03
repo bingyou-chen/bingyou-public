@@ -9,104 +9,48 @@ import matplotlib.pyplot as plt
 from statsmodels.tsa.statespace.tools import (
     constrain_stationary_univariate, unconstrain_stationary_univariate)
 
-from scipy.stats import norm, invgamma
+from scipy.stats import norm, multivariate_normal, invgamma
 from scipy.special import logsumexp
 from scipy.signal import lfilter
 
 OBS_INITIAL_AR_BURN = 2
+RANDOM_STATE =  np.random.RandomState(11) # deterministic random data
 
-def get_design_matrix(phi):
-    H = [[1/3,2/3,1,2/3,1/3]*3]
-    for design_beta, ar_betas in zip(phi['param_cycle_design_betas'], phi['param_innov_ar_betas']):
-        params = [design_beta, -design_beta*ar_betas[0], -design_beta*ar_betas[1]]
-        H.append([0]*5 + params + [0]*7)
+def draw_posterior_sigma2(X, Y, beta=np.array([1]), prior_params=(1, 0.001)):
+    resid = Y - X.dot(beta) 
+    post_shape = prior_params[0] + len(resid) + 1
+    post_scale = prior_params[1] + np.sum(resid**2)
     
-    return np.array(H)
+    # return invgamma(shape, scale), shape: n_obs, or degree of freedom; scale: sum of variance variable
+    # scale/shape decides expected value of the variance variable
+    # scale is sample size, it decides the dispersion of the variance variable
+    # return invgamma(post_shape, scale=post_scale).rvs()
+    return 1/RANDOM_STATE.gamma(post_shape,1/post_scale)
 
 
-def get_transition_matrix(phi):
-    F1 = np.concatenate([
-            np.array([[1,0,0,0,0]]),
-            np.concatenate([
-                np.eye(4),
-                np.zeros([4,1])
-            ],axis=1)
-        ])
-    F2 = np.concatenate([
-            np.array([phi['param_cycle_ar_betas']+[0,0,0]]),
-            np.concatenate([
-                np.eye(4),
-                np.zeros([4,1])
-            ],axis=1)        
-        ])
-    F3 = np.concatenate([
-            np.array([phi['param_innov1_ar_betas']+[0,0,0]]),
-            np.concatenate([
-                np.eye(4),
-                np.zeros([4,1])
-            ],axis=1)        
-        ])
+def draw_beta_gls(X, Y, error_cov):
+    """
+    http://web.vu.lt/mif/a.buteikis/wp-content/uploads/PE_Book/4-6-Multiple-GLS.html
+    """    
+    nobs = len(Y)
+    error_cov_inv = np.linalg.inv(error_cov)
+
+    beta_hat = np.linalg.inv(X.T.dot(error_cov_inv).dot(X)) \
+        .dot(X.T.dot(error_cov_inv).dot(Y))
     
-    F = np.concatenate([
-            np.concatenate([
-                F1,
-                np.zeros([5,5]),
-                np.zeros([5,5])
-            ],axis=1),
-            np.concatenate([
-                np.zeros([5,5]),
-                F2,
-                np.zeros([5,5])
-            ],axis=1),
-            np.concatenate([
-                np.zeros([5,5]),
-                np.zeros([5,5]),
-                F3
-            ],axis=1)
-        ])
-
-    return F
-
-
-def get_obs_cov(obs_innovs_list):
-    n = len(obs_innovs_list) + 1
-    m = len(obs_innovs_list[0])
-    print('get_obs_cov, dimention: n: {}, m: {}'.format(n,m))
-    nums_all = [0] * m * n 
-    for i in range(len(obs_innovs_list)):
-        nums_all+=[0]*m
-        nums_all+= [0]*m*i
-        obs_innovs = obs_innovs_list[i]
-        nums_all+= obs_innovs 
-        nums_all+= [0]*m*(n-1-i-1)
-
-    R = np.reshape(nums_all, (n,n,m))
+    sigma2_hat = (Y-X.dot(beta_hat)).T \
+                    .dot(error_cov_inv) \
+                    .dot(Y-X.dot(beta_hat)) \
+                    /(nobs-2-1)
+                    
+    beta_var = sigma2_hat * np.linalg.inv(X.T.dot(error_cov_inv).dot(X))
     
-    return R
-
-
-def get_state_cov(param_var_trend, stoch_vol, k_states):
-    vols_cycle = stoch_vol['stoch_vol_cycle']
-    vols_innov = stoch_vol['stoch_vol_innov']
- 
-    m = len(vols_cycle)
-    nums_all = []
+    beta_drawed = RANDOM_STATE.multivariate_normal(mean=beta_hat,cov=beta_var)
+    while(abs(sum(beta_drawed)) > 1):
+        print('draw_posterior_beta_gls, reject a draw of {} because it is explosive'.format(beta_drawed))
+        beta_drawed = RANDOM_STATE.multivariate_normal(mean=beta_hat,cov=beta_var)    
     
-    # construct a one-dimensional list first, then reshape to 3-dimensional state covariance matrix
-    for row_id in range(k_states):
-        for col_id in range(k_states):
-            if (row_id==0) and (col_id==0):
-                nums_all+= [param_var_trend]*m
-            elif (row_id==5) and (col_id==5):
-                nums_all+= vols_cycle
-            elif (row_id==10) and (col_id==10):
-                nums_all+= vols_innov
-            else:
-                nums_all+= [0]*m
-                
-    Q = np.reshape(nums_all, (k_states,k_states,m))
-    
-    return Q
+    return beta_drawed
 
 
 
@@ -143,12 +87,107 @@ class ATITG(sm.tsa.statespace.MLEModel):
                                 )
         self.initialize_approximate_diffuse(variance=10**4) # X0 ∼ N(0, 104)
         
-        self['design'] = get_design_matrix(phi)
-        self['transition'] = get_transition_matrix(phi)
+        self['design'] = self.get_design_matrix(phi)
+        self['transition'] = self.get_transition_matrix(phi)
         self['selection'] = np.eye(k_states)
-        self['obs_cov'] = get_obs_cov(stoch_vol['stoch_vol_obs_innov'])
-        self['state_cov'] = get_state_cov(phi['param_var_trend'], stoch_vol, k_states) 
+        self['obs_cov'] = self.get_obs_cov(stoch_vol['stoch_vol_obs_innov'])
+        self['state_cov'] = self.get_state_cov(phi['param_var_trend'], stoch_vol, k_states) 
         
+
+    
+    def get_design_matrix(self, phi):
+        H = [[1/3,2/3,1,2/3,1/3]*3]
+        for design_beta, ar_betas in zip(phi['param_cycle_design_betas'], phi['param_innov_ar_betas']):
+            params = [design_beta, -design_beta*ar_betas[0], -design_beta*ar_betas[1]]
+            H.append([0]*5 + params + [0]*7)
+        
+        return np.array(H)
+    
+    
+    def get_transition_matrix(self, phi):
+        F1 = np.concatenate([
+                np.array([[1,0,0,0,0]]),
+                np.concatenate([
+                    np.eye(4),
+                    np.zeros([4,1])
+                ],axis=1)
+            ])
+        F2 = np.concatenate([
+                np.array([phi['param_cycle_ar_betas']+[0,0,0]]),
+                np.concatenate([
+                    np.eye(4),
+                    np.zeros([4,1])
+                ],axis=1)        
+            ])
+        F3 = np.concatenate([
+                np.array([phi['param_innov1_ar_betas']+[0,0,0]]),
+                np.concatenate([
+                    np.eye(4),
+                    np.zeros([4,1])
+                ],axis=1)        
+            ])
+        
+        F = np.concatenate([
+                np.concatenate([
+                    F1,
+                    np.zeros([5,5]),
+                    np.zeros([5,5])
+                ],axis=1),
+                np.concatenate([
+                    np.zeros([5,5]),
+                    F2,
+                    np.zeros([5,5])
+                ],axis=1),
+                np.concatenate([
+                    np.zeros([5,5]),
+                    np.zeros([5,5]),
+                    F3
+                ],axis=1)
+            ])
+    
+        return F
+    
+    
+    def get_obs_cov(self, obs_innovs_list):
+        n = len(obs_innovs_list) + 1
+        m = len(obs_innovs_list[0])
+        print('get_obs_cov, dimention: n: {}, m: {}'.format(n,m))
+        nums_all = [0] * m * n 
+        for i in range(len(obs_innovs_list)):
+            nums_all+=[0]*m
+            nums_all+= [0]*m*i
+            obs_innovs = obs_innovs_list[i]
+            nums_all+= obs_innovs 
+            nums_all+= [0]*m*(n-1-i-1)
+    
+        R = np.reshape(nums_all, (n,n,m))
+        
+        return R
+    
+    
+    def get_state_cov(self, param_var_trend, stoch_vol, k_states):
+        vols_cycle = stoch_vol['stoch_vol_cycle']
+        vols_innov = stoch_vol['stoch_vol_innov']
+     
+        m = len(vols_cycle)
+        nums_all = []
+        
+        # construct a one-dimensional list first, then reshape to 3-dimensional state covariance matrix
+        for row_id in range(k_states):
+            for col_id in range(k_states):
+                if (row_id==0) and (col_id==0):
+                    nums_all+= [param_var_trend]*m
+                elif (row_id==5) and (col_id==5):
+                    nums_all+= vols_cycle
+                elif (row_id==10) and (col_id==10):
+                    nums_all+= vols_innov
+                else:
+                    nums_all+= [0]*m
+                    
+        Q = np.reshape(nums_all, (k_states,k_states,m))
+        
+        return Q
+    
 
 
     @property
@@ -171,11 +210,11 @@ class ATITG(sm.tsa.statespace.MLEModel):
         if ('phi' in kwargs) and ('stoch_vol' in kwargs): 
             k_states, phi, stoch_vol = self.k_states, kwargs['phi'], kwargs['stoch_vol']
             kwargs = {key:kwargs[key] for key in kwargs if key not in ['phi','stoch_vol']}      
-            self['design'] = get_design_matrix(phi)
-            self['transition'] = get_transition_matrix(phi)
+            self['design'] = self.get_design_matrix(phi)
+            self['transition'] = self.get_transition_matrix(phi)
             self['selection'] = np.eye(k_states)
-            self['obs_cov'] = get_obs_cov(stoch_vol['stoch_vol_obs_innov'])
-            self['state_cov'] = get_state_cov(phi['param_var_trend'], stoch_vol, k_states) 
+            self['obs_cov'] = self.get_obs_cov(stoch_vol['stoch_vol_obs_innov'])
+            self['state_cov'] = self.get_state_cov(phi['param_var_trend'], stoch_vol, k_states) 
 
         super(ATITG, self).update(params, **kwargs)
         
@@ -186,7 +225,7 @@ class ATITG(sm.tsa.statespace.MLEModel):
 ########
 ## Loading Data
 # expect: first col is official Quarterly GDP; remainly columns are detrended monthly indicators
-rng = np.random.RandomState(10) # deterministic random data
+RNG = np.random.RandomState(10) # deterministic random data
 
 def get_dummy_us_growth_endog(n=30, obs_innov_params=(0.5, 5), trend_mav_periods=120, cycle_mav_periods=9):
     raw_data = pd.read_csv(r'local/raw_us_gdp.csv',index_col=0).set_index('DATE')
@@ -202,7 +241,7 @@ def get_dummy_us_growth_endog(n=30, obs_innov_params=(0.5, 5), trend_mav_periods
     cycle_std = data['cycle'].std()
     for i in range(n):
         chunk = (i//obs_innov_params[1] + 1) * obs_innov_params[0]
-        rand_nums = rng.normal(size=m)
+        rand_nums = RNG.normal(size=m)
         obs_innov = rand_nums * cycle_std * chunk
         data['y{}'.format(i)] = data['cycle'] + obs_innov
     
@@ -292,6 +331,25 @@ atitg_simsmoother.simulate()
 ## end
 ########
 
+########
+## C.2.2 Draw the variance of the time-varying GDP growth component
+states = atitg_simsmoother.simulated_state
+phi['param_var_trend'] = draw_posterior_sigma2(X=states[[0], :-1].T, Y=states[0, 1:], beta=np.array([1]), prior_params=(1, 0.001))
+    
+## end
+########
+
+########
+## C.2.3 Draw the autoregressive parameters of the factor VAR
+states = atitg_simsmoother.simulated_state
+nobs = atitg_simsmoother.simulated_state.shape[1]
+error_cov = np.zeros([nobs]*2)
+np.fill_diagonal(error_cov, stoch_vol['stoch_vol_cycle'])
+
+phi['param_cycle_ar_betas'] = draw_beta_gls(X=states[[6,7],:].T, Y=states[5,:], error_cov=error_cov) # the 5th state is the cycle factor
+
+## end
+########
 
 
 ###### unit test #######
