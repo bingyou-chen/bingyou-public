@@ -28,7 +28,7 @@ def draw_posterior_sigma2(X, Y, beta=np.array([1]), prior_params=(1, 0.001)):
     return 1/RANDOM_STATE.gamma(post_shape,1/post_scale)
 
 
-def draw_beta_gls(X, Y, error_cov):
+def draw_beta_gls(X, Y, error_cov, reject_explosive=False):
     """
     http://web.vu.lt/mif/a.buteikis/wp-content/uploads/PE_Book/4-6-Multiple-GLS.html
     """    
@@ -46,10 +46,11 @@ def draw_beta_gls(X, Y, error_cov):
     beta_var = sigma2_hat * np.linalg.inv(X.T.dot(error_cov_inv).dot(X))
     
     beta_drawed = RANDOM_STATE.multivariate_normal(mean=beta_hat,cov=beta_var)
-    while(abs(sum(beta_drawed)) > 1):
-        print('draw_posterior_beta_gls, reject a draw of {} because it is explosive'.format(beta_drawed))
-        beta_drawed = RANDOM_STATE.multivariate_normal(mean=beta_hat,cov=beta_var)    
-    
+    if reject_explosive:
+        while(abs(sum(beta_drawed)) > 1):
+            print('draw_posterior_beta_gls, reject a draw of {} because it is explosive'.format(beta_drawed))
+            beta_drawed = RANDOM_STATE.multivariate_normal(mean=beta_hat,cov=beta_var)    
+        
     return beta_drawed
 
 
@@ -267,7 +268,6 @@ data_columns = data_observation.columns
 
 #######
 #### C.2.0 Initialization
-phi = {}
 
 # initialize model parameters
 phi=dict(
@@ -346,7 +346,32 @@ nobs = atitg_simsmoother.simulated_state.shape[1]
 error_cov = np.zeros([nobs]*2)
 np.fill_diagonal(error_cov, stoch_vol['stoch_vol_cycle'])
 
-phi['param_cycle_ar_betas'] = draw_beta_gls(X=states[[6,7],:].T, Y=states[5,:], error_cov=error_cov) # the 5th state is the cycle factor
+phi['param_cycle_ar_betas'] = draw_beta_gls(X=states[[6,7],:].T, Y=states[5,:], error_cov=error_cov, reject_explosive=True) # the 5th state is the cycle factor
+
+## end
+########
+
+########
+## C.2.4 Draw the factor loadings
+states = atitg_simsmoother.simulated_state
+nobs = atitg_simsmoother.simulated_state.shape[1]
+X = states[[5],:].T
+for i in range(1, data_observation.shape[1]):
+    Y = np.array(data_observation.iloc[OBS_INITIAL_AR_BURN:,i])
+    vols = stoch_vol['stoch_vol_obs_innov'][i-1]    
+    innov_ar_betas = phi['param_innov_ar_betas'][i-1]
+    error_cov = np.zeros([nobs]*2)
+    np.fill_diagonal(error_cov, vols)
+    rng = np.arange(nobs-2)
+    error_cov[rng,rng+1] = np.array(vols[:-2]) * innov_ar_betas[0]
+    error_cov[rng,rng+2] = np.array(vols[:-2]) * innov_ar_betas[1]
+    error_cov[rng+1,rng] = np.array(vols[:-2]) * innov_ar_betas[0]
+    error_cov[rng+2,rng] = np.array(vols[:-2]) * innov_ar_betas[1]
+    
+    error_cov[-1,-2] = vols[-2] * innov_ar_betas[0]
+    error_cov[-2,-1] = vols[-2] * innov_ar_betas[0]
+        
+    phi['param_cycle_design_betas'][i-1] = draw_beta_gls(X=X, Y=Y, error_cov=error_cov) # the 5th state is the cycle factor
 
 ## end
 ########
