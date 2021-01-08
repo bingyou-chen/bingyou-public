@@ -283,12 +283,16 @@ phi=dict(
 # initialize stochastic vols
 stoch_vol=dict(
     stoch_vol_cycle = [0.1] * (len(data_index)-OBS_INITIAL_AR_BURN),
+    
+    #  stochastic volitility for idiosyncratic component of growth (nobs * 1)
     stoch_vol_innov = [0.1] * (len(data_index)-OBS_INITIAL_AR_BURN),
+    
+    #  stochastic volitility for idiosyncratic component of cycle obsercation (nobs * (m-1)) 
     stoch_vol_obs_innov = [[0.1] * (len(data_index)-OBS_INITIAL_AR_BURN) for i in range(len(data_columns)-1)]
 )
 
 #### end
-########
+
 
 
 ########
@@ -319,17 +323,16 @@ atitg_model = ATITG(endog, phi, stoch_vol)
 atitg_simsmoother = atitg_model.simulation_smoother()
 atitg_simsmoother.simulate()
 
-# atitg_model.update([], phi=phi, stoch_vol=stoch_vol)
-# atitg_filterred = atitg_model.filter([])
-# atitg_smoothed = atitg_model.smooth([])
-
-# atitg_filterred.filtered_state
-# atitg_smoothed.smoothed_state
-# atitg_simsmoother.simulated_state
-# plt.plot(atitg_smoothed.smoothed_state[0])
+                # atitg_model.update([], phi=phi, stoch_vol=stoch_vol)
+                # atitg_filterred = atitg_model.filter([])
+                # atitg_smoothed = atitg_model.smooth([])
+                
+                # atitg_filterred.filtered_state
+                # atitg_smoothed.smoothed_state
+                # atitg_simsmoother.simulated_state
+                # plt.plot(atitg_smoothed.smoothed_state[0])
 
 ## end
-########
 
 ########
 ## C.2.2 Draw the variance of the time-varying GDP growth component
@@ -337,7 +340,6 @@ states = atitg_simsmoother.simulated_state
 phi['param_var_trend'] = draw_posterior_sigma2(X=states[[0], :-1].T, Y=states[0, 1:], beta=np.array([1]), prior_params=(1, 0.001))
     
 ## end
-########
 
 ########
 ## C.2.3 Draw the autoregressive parameters of the factor VAR
@@ -349,13 +351,15 @@ np.fill_diagonal(error_cov, stoch_vol['stoch_vol_cycle'])
 phi['param_cycle_ar_betas'] = draw_beta_gls(X=states[[6,7],:].T, Y=states[5,:], error_cov=error_cov, reject_explosive=True) # the 5th state is the cycle factor
 
 ## end
-########
+
 
 ########
 ## C.2.4 Draw the factor loadings
+# vol of innovation is approximated from innovation AR process error
 states = atitg_simsmoother.simulated_state
 nobs = atitg_simsmoother.simulated_state.shape[1]
 X = states[[5],:].T
+
 for i in range(1, data_observation.shape[1]):
     Y = np.array(data_observation.iloc[OBS_INITIAL_AR_BURN:,i])
     vols = stoch_vol['stoch_vol_obs_innov'][i-1]    
@@ -371,10 +375,35 @@ for i in range(1, data_observation.shape[1]):
     error_cov[-1,-2] = vols[-2] * innov_ar_betas[0]
     error_cov[-2,-1] = vols[-2] * innov_ar_betas[0]
         
-    phi['param_cycle_design_betas'][i-1] = draw_beta_gls(X=X, Y=Y, error_cov=error_cov) # the 5th state is the cycle factor
+    phi['param_cycle_design_betas'][i-1] = draw_beta_gls(X=X, Y=Y, error_cov=error_cov)[0] # the 5th state is the cycle factor
 
 ## end
 ########
+
+
+########
+## C.2.5 Draw the serial correlation coefficients of the idiosyncratic components
+states = atitg_simsmoother.simulated_state
+nobs = atitg_simsmoother.simulated_state.shape[1]
+f = states[[5],:].T
+
+for i in range(1, data_observation.shape[1]):
+    y = np.array(data_observation.iloc[OBS_INITIAL_AR_BURN:,i])
+    vols = stoch_vol['stoch_vol_obs_innov'][i-1]
+    factor_loading_beta = phi['param_cycle_design_betas'][i-1]
+    idio = y - f.dot(np.array([factor_loading_beta]))
+    
+    X = np.vstack((idio[1:-1], idio[:-2])).T
+    Y = np.array(idio[2:])
+
+    error_cov = np.zeros([nobs-2]*2)
+    np.fill_diagonal(error_cov, vols[2:])
+        
+    phi['param_innov_ar_betas'][i-1] = draw_beta_gls(X=X, Y=Y, error_cov=error_cov) # the 5th state is the cycle factor
+
+## end
+########
+
 
 
 ###### unit test #######
