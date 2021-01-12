@@ -1,17 +1,22 @@
 ##################### Example ####################################
 from __future__ import division
-
+import sys, os
+sys.path.append(r'../../')
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
-import matplotlib.pyplot as plt
+import copy
+# import matplotlib.pyplot as plt
 
-from statsmodels.tsa.statespace.tools import (
-    constrain_stationary_univariate, unconstrain_stationary_univariate)
+# from statsmodels.tsa.statespace.tools import (
+#     constrain_stationary_univariate, unconstrain_stationary_univariate)
 
-from scipy.stats import norm, multivariate_normal, invgamma
-from scipy.special import logsumexp
-from scipy.signal import lfilter
+# from scipy.stats import norm, multivariate_normal, invgamma
+# from scipy.special import logsumexp
+# from scipy.signal import lfilter
+
+from statespace.libs.sv import estimate_stoch_vol
+
 
 OBS_INITIAL_AR_BURN = 2
 RANDOM_STATE =  np.random.RandomState(11) # deterministic random data
@@ -52,7 +57,6 @@ def draw_beta_gls(X, Y, error_cov, reject_explosive=False):
             beta_drawed = RANDOM_STATE.multivariate_normal(mean=beta_hat,cov=beta_var)    
         
     return beta_drawed
-
 
 
 class ATITG(sm.tsa.statespace.MLEModel):
@@ -114,14 +118,14 @@ class ATITG(sm.tsa.statespace.MLEModel):
                 ],axis=1)
             ])
         F2 = np.concatenate([
-                np.array([phi['param_cycle_ar_betas']+[0,0,0]]),
+                np.array([np.concatenate([phi['param_cycle_ar_betas'],np.array([0,0,0])])]),
                 np.concatenate([
                     np.eye(4),
                     np.zeros([4,1])
                 ],axis=1)        
             ])
         F3 = np.concatenate([
-                np.array([phi['param_innov1_ar_betas']+[0,0,0]]),
+                np.array([np.concatenate([phi['param_innov1_ar_betas'],np.array([0,0,0])])]),
                 np.concatenate([
                     np.eye(4),
                     np.zeros([4,1])
@@ -158,7 +162,7 @@ class ATITG(sm.tsa.statespace.MLEModel):
             nums_all+=[0]*m
             nums_all+= [0]*m*i
             obs_innovs = obs_innovs_list[i]
-            nums_all+= obs_innovs 
+            nums_all+= list(obs_innovs) 
             nums_all+= [0]*m*(n-1-i-1)
     
         R = np.reshape(nums_all, (n,n,m))
@@ -179,9 +183,9 @@ class ATITG(sm.tsa.statespace.MLEModel):
                 if (row_id==0) and (col_id==0):
                     nums_all+= [param_var_trend]*m
                 elif (row_id==5) and (col_id==5):
-                    nums_all+= vols_cycle
+                    nums_all+= list(vols_cycle)
                 elif (row_id==10) and (col_id==10):
-                    nums_all+= vols_innov
+                    nums_all+= list(vols_innov)
                 else:
                     nums_all+= [0]*m
                     
@@ -223,11 +227,11 @@ class ATITG(sm.tsa.statespace.MLEModel):
 
 ####################################################################################################        
 
+RNG = np.random.RandomState(10) # deterministic random data
+
 ########
 ## Loading Data
 # expect: first col is official Quarterly GDP; remainly columns are detrended monthly indicators
-RNG = np.random.RandomState(10) # deterministic random data
-
 def get_dummy_us_growth_endog(n=30, obs_innov_params=(0.5, 5), trend_mav_periods=120, cycle_mav_periods=9):
     raw_data = pd.read_csv(r'local/raw_us_gdp.csv',index_col=0).set_index('DATE')
     raw_data.index = raw_data.index.map(pd.Timestamp)
@@ -265,16 +269,15 @@ data_columns = data_observation.columns
 ## end
 ########
 
-
 #######
 #### C.2.0 Initialization
 
 # initialize model parameters
 phi=dict(
-    param_cycle_design_betas = [1] * (len(data_columns) - 1),
-    param_cycle_ar_betas = [0,0],
-    param_innov1_ar_betas = [0,0],
-    param_innov_ar_betas =  [[0,0] for i in range(1,len(data_columns))], # ρ
+    param_cycle_design_betas = np.array([1] * (len(data_columns) - 1)),
+    param_cycle_ar_betas = np.array([0,0]),
+    param_innov1_ar_betas = np.array([0,0]),
+    param_innov_ar_betas =  [np.array([0,0]) for i in range(1,len(data_columns))], # ρ
     param_var_trend = 0.001,
     param_var_stoch_cycle_var = 0.01,
     param_var_stoch_innov_var = 0.01
@@ -282,129 +285,185 @@ phi=dict(
 
 # initialize stochastic vols
 stoch_vol=dict(
-    stoch_vol_cycle = [0.1] * (len(data_index)-OBS_INITIAL_AR_BURN),
+    stoch_vol_cycle = np.array([0.1] * (len(data_index)-OBS_INITIAL_AR_BURN)),
     
     #  stochastic volitility for idiosyncratic component of growth (nobs * 1)
-    stoch_vol_innov = [0.1] * (len(data_index)-OBS_INITIAL_AR_BURN),
+    stoch_vol_innov = np.array([0.1] * (len(data_index)-OBS_INITIAL_AR_BURN)),
     
     #  stochastic volitility for idiosyncratic component of cycle obsercation (nobs * (m-1)) 
-    stoch_vol_obs_innov = [[0.1] * (len(data_index)-OBS_INITIAL_AR_BURN) for i in range(len(data_columns)-1)]
+    stoch_vol_obs_innov = [np.array([0.1] * (len(data_index)-OBS_INITIAL_AR_BURN)) for i in range(len(data_columns)-1)]
 )
 
 #### end
 
 
-
-########
-## C.2.1 Draw latent variables conditional on model parameters and SVs
-
-# initialize endog
-def derive_ar_diff_y_minus_intercept(data_observation, data_intercept, innovation_ar_params):
-    n_lags = len(innovation_ar_params[0])
-    data_cycle_n_innovation = data_observation - data_intercept
+n_iterations = 100
+trace_phi, trace_stoch_vol = [phi], [stoch_vol]
+for i in range(1, n_iterations):
+    print('start iterations {}'.format(i))
+    phi = copy.deepcopy(trace_phi[i-1])
+    stoch_vol = copy.deepcopy(trace_stoch_vol[i-1])
+    ########
+    ## C.2.1 Draw latent variables conditional on model parameters and SVs
     
-    data_y_ar_diff = data_cycle_n_innovation.copy()
-    for i in range(n_lags):
-        data_obs_m_ar = data_cycle_n_innovation.multiply([l[i] for l in innovation_ar_params])
-        data_y_ar_diff-= data_obs_m_ar.shift(i+1)
-
-    fvidx = data_y_ar_diff.first_valid_index()
-    data_y_ar_diff.loc[:fvidx] = data_y_ar_diff.loc[:fvidx].bfill()
-    return data_y_ar_diff
-
-
-data_intercept = pd.DataFrame(0, index=data_index, columns=data_columns)
-endog = data_observation.copy()
-endog.iloc[:,1:] = derive_ar_diff_y_minus_intercept(data_observation.iloc[:,1:], data_intercept.iloc[:,1:], phi['param_innov_ar_betas'])
-
-endog = endog.iloc[OBS_INITIAL_AR_BURN:]
-atitg_model = ATITG(endog, phi, stoch_vol)
-
-atitg_simsmoother = atitg_model.simulation_smoother()
-atitg_simsmoother.simulate()
-
-                # atitg_model.update([], phi=phi, stoch_vol=stoch_vol)
-                # atitg_filterred = atitg_model.filter([])
-                # atitg_smoothed = atitg_model.smooth([])
-                
-                # atitg_filterred.filtered_state
-                # atitg_smoothed.smoothed_state
-                # atitg_simsmoother.simulated_state
-                # plt.plot(atitg_smoothed.smoothed_state[0])
-
-## end
-
-########
-## C.2.2 Draw the variance of the time-varying GDP growth component
-states = atitg_simsmoother.simulated_state
-phi['param_var_trend'] = draw_posterior_sigma2(X=states[[0], :-1].T, Y=states[0, 1:], beta=np.array([1]), prior_params=(1, 0.001))
+    # initialize endog
+    def derive_ar_diff_y_minus_intercept(data_observation, data_intercept, innovation_ar_params):
+        n_lags = len(innovation_ar_params[0])
+        data_cycle_n_innovation = data_observation - data_intercept
+        
+        data_y_ar_diff = data_cycle_n_innovation.copy()
+        for i in range(n_lags):
+            data_obs_m_ar = data_cycle_n_innovation.multiply([l[i] for l in innovation_ar_params])
+            data_y_ar_diff-= data_obs_m_ar.shift(i+1)
     
-## end
-
-########
-## C.2.3 Draw the autoregressive parameters of the factor VAR
-states = atitg_simsmoother.simulated_state
-nobs = atitg_simsmoother.simulated_state.shape[1]
-error_cov = np.zeros([nobs]*2)
-np.fill_diagonal(error_cov, stoch_vol['stoch_vol_cycle'])
-
-phi['param_cycle_ar_betas'] = draw_beta_gls(X=states[[6,7],:].T, Y=states[5,:], error_cov=error_cov, reject_explosive=True) # the 5th state is the cycle factor
-
-## end
-
-
-########
-## C.2.4 Draw the factor loadings
-# vol of innovation is approximated from innovation AR process error
-states = atitg_simsmoother.simulated_state
-nobs = atitg_simsmoother.simulated_state.shape[1]
-X = states[[5],:].T
-
-for i in range(1, data_observation.shape[1]):
-    Y = np.array(data_observation.iloc[OBS_INITIAL_AR_BURN:,i])
-    vols = stoch_vol['stoch_vol_obs_innov'][i-1]    
-    innov_ar_betas = phi['param_innov_ar_betas'][i-1]
+        fvidx = data_y_ar_diff.first_valid_index()
+        data_y_ar_diff.loc[:fvidx] = data_y_ar_diff.loc[:fvidx].bfill()
+        return data_y_ar_diff
+    
+    
+    data_intercept = pd.DataFrame(0, index=data_index, columns=data_columns)
+    endog = data_observation.copy()
+    endog.iloc[:,1:] = derive_ar_diff_y_minus_intercept(data_observation.iloc[:,1:], data_intercept.iloc[:,1:], phi['param_innov_ar_betas'])
+    
+    endog = endog.iloc[OBS_INITIAL_AR_BURN:]
+    atitg_model = ATITG(endog, phi, stoch_vol)
+    
+    atitg_simsmoother = atitg_model.simulation_smoother()
+    atitg_simsmoother.simulate()
+    
+                    # atitg_model.update([], phi=phi, stoch_vol=stoch_vol)
+                    # atitg_filterred = atitg_model.filter([])
+                    # atitg_smoothed = atitg_model.smooth([])
+                    
+                    # atitg_filterred.filtered_state
+                    # atitg_smoothed.smoothed_state
+                    # atitg_simsmoother.simulated_state
+                    # plt.plot(atitg_smoothed.smoothed_state[0])
+    
+    ## end
+    
+    ########
+    ## C.2.2 Draw the variance of the time-varying GDP growth component
+    states = atitg_simsmoother.simulated_state
+    phi['param_var_trend'] = draw_posterior_sigma2(X=states[[0], :-1].T, Y=states[0, 1:], beta=np.array([1]), prior_params=(1, 0.001))
+        
+    ## end
+    
+    ########
+    ## C.2.3 Draw the autoregressive parameters of the factor VAR
+    states = atitg_simsmoother.simulated_state
+    nobs = atitg_simsmoother.simulated_state.shape[1]
     error_cov = np.zeros([nobs]*2)
-    np.fill_diagonal(error_cov, vols)
-    rng = np.arange(nobs-2)
-    error_cov[rng,rng+1] = np.array(vols[:-2]) * innov_ar_betas[0]
-    error_cov[rng,rng+2] = np.array(vols[:-2]) * innov_ar_betas[1]
-    error_cov[rng+1,rng] = np.array(vols[:-2]) * innov_ar_betas[0]
-    error_cov[rng+2,rng] = np.array(vols[:-2]) * innov_ar_betas[1]
+    np.fill_diagonal(error_cov, stoch_vol['stoch_vol_cycle'])
     
-    error_cov[-1,-2] = vols[-2] * innov_ar_betas[0]
-    error_cov[-2,-1] = vols[-2] * innov_ar_betas[0]
-        
-    phi['param_cycle_design_betas'][i-1] = draw_beta_gls(X=X, Y=Y, error_cov=error_cov)[0] # the 5th state is the cycle factor
-
-## end
-########
-
-
-########
-## C.2.5 Draw the serial correlation coefficients of the idiosyncratic components
-states = atitg_simsmoother.simulated_state
-nobs = atitg_simsmoother.simulated_state.shape[1]
-f = states[[5],:].T
-
-for i in range(1, data_observation.shape[1]):
-    y = np.array(data_observation.iloc[OBS_INITIAL_AR_BURN:,i])
-    vols = stoch_vol['stoch_vol_obs_innov'][i-1]
-    factor_loading_beta = phi['param_cycle_design_betas'][i-1]
-    idio = y - f.dot(np.array([factor_loading_beta]))
+    phi['param_cycle_ar_betas'] = draw_beta_gls(X=states[[6,7],:].T, Y=states[5,:], error_cov=error_cov, reject_explosive=True) # the 5th state is the cycle factor
     
-    X = np.vstack((idio[1:-1], idio[:-2])).T
-    Y = np.array(idio[2:])
+    ## end
+    
 
-    error_cov = np.zeros([nobs-2]*2)
-    np.fill_diagonal(error_cov, vols[2:])
+    ########
+    ## C.2.4 Draw the factor loadings
+    # vol of innovation is approximated from innovation AR process error
+    states = atitg_simsmoother.simulated_state
+    nobs = atitg_simsmoother.simulated_state.shape[1]
+    X = states[[5],:].T
+    
+    for i in range(1, data_observation.shape[1]):
+        Y = np.array(data_observation.iloc[OBS_INITIAL_AR_BURN:,i])
+        vols = stoch_vol['stoch_vol_obs_innov'][i-1]    
+        innov_ar_betas = phi['param_innov_ar_betas'][i-1]
+        error_cov = np.zeros([nobs]*2)
+        np.fill_diagonal(error_cov, vols)
+        rng = np.arange(nobs-2)
+        error_cov[rng,rng+1] = np.array(vols[:-2]) * innov_ar_betas[0]
+        error_cov[rng,rng+2] = np.array(vols[:-2]) * innov_ar_betas[1]
+        error_cov[rng+1,rng] = np.array(vols[:-2]) * innov_ar_betas[0]
+        error_cov[rng+2,rng] = np.array(vols[:-2]) * innov_ar_betas[1]
         
-    phi['param_innov_ar_betas'][i-1] = draw_beta_gls(X=X, Y=Y, error_cov=error_cov) # the 5th state is the cycle factor
-
-## end
-########
-
-
+        error_cov[-1,-2] = vols[-2] * innov_ar_betas[0]
+        error_cov[-2,-1] = vols[-2] * innov_ar_betas[0]
+            
+        phi['param_cycle_design_betas'][i-1] = draw_beta_gls(X=X, Y=Y, error_cov=error_cov)[0] # the 5th state is the cycle factor
+    
+    ## end
+    ########
+    
+    
+    ########
+    ## C.2.5 Draw the serial correlation coefficients of the idiosyncratic components
+    states = atitg_simsmoother.simulated_state
+    nobs = atitg_simsmoother.simulated_state.shape[1]
+    t = states[[10],:].T
+    f = states[[5],:].T
+    
+    # for idiosyncratic components of growth observations
+    error_cov = np.zeros([nobs]*2)
+    np.fill_diagonal(error_cov, stoch_vol['stoch_vol_innov'])
+    phi['param_innov1_ar_betas'] = draw_beta_gls(X=states[[11,12],:].T, Y=states[10,:], error_cov=error_cov, reject_explosive=True) # the 5th state is the cycle factor
+    
+    
+    # for idiosyncratic components of cycle observations
+    for i in range(1, data_observation.shape[1]):
+        y = np.array(data_observation.iloc[OBS_INITIAL_AR_BURN:,i])
+        vols = stoch_vol['stoch_vol_obs_innov'][i-1]
+        factor_loading_beta = phi['param_cycle_design_betas'][i-1]
+        idio = y - f.dot(np.array([factor_loading_beta]))
+        
+        X = np.vstack((idio[1:-1], idio[:-2])).T
+        Y = np.array(idio[2:])
+    
+        error_cov = np.zeros([nobs-2]*2)
+        np.fill_diagonal(error_cov, vols[2:])
+            
+        phi['param_innov_ar_betas'][i-1] = draw_beta_gls(X=X, Y=Y, error_cov=error_cov) # the 5th state is the cycle factor
+    
+    ## end
+    ########
+    
+    #estimate_stoch_vol
+    
+    ########
+    ## C.2.6 Draw the stochastic volatilities
+    states = atitg_simsmoother.simulated_state
+    nobs = atitg_simsmoother.simulated_state.shape[1]
+    error_cov = np.zeros([nobs]*2)
+    np.fill_diagonal(error_cov, stoch_vol['stoch_vol_cycle'])
+    
+    # draw stochastic volitities of the innovations to the factor
+    X = states[[6,7],:].T
+    Y = states[5,:]
+    beta = phi['param_cycle_ar_betas']
+    errors = Y - X.dot(beta)
+    simulated_vol = estimate_stoch_vol(errors, RNG,params=(100,50,1,None), initial_values=(0,0,0.95,0.5), ksc_scale=1, plot=False)
+    stoch_vol['stoch_vol_cycle'] = simulated_vol
+    
+    # draw stochastic volitities of the innovations to the first idiosyncratic component
+    X = states[[11,12],:].T
+    Y = states[10,:]
+    beta = phi['param_innov1_ar_betas']
+    errors = Y - X.dot(beta)
+    simulated_vol = estimate_stoch_vol(errors, RNG,params=(100,50,1,None), initial_values=(0,0,0.95,0.5), ksc_scale=1, plot=False)
+    stoch_vol['stoch_vol_innov'] = simulated_vol
+    
+    # draw stochastic volitities of the innovations to other idiosyncratic components
+    for i in range(1, data_observation.shape[1]):
+        y = np.array(data_observation.iloc[OBS_INITIAL_AR_BURN:,i])
+        factor_loading_beta = phi['param_cycle_design_betas'][i-1]
+        idio = y - f.dot(np.array([factor_loading_beta]))
+        
+        X = np.vstack((idio[1:-1], idio[:-2])).T
+        Y = np.array(idio[2:])
+        beta = phi['param_innov_ar_betas'][i-1]
+        errors = Y - X.dot(beta)
+        simulated_vol = estimate_stoch_vol(errors, RNG, params=(100,50,1,None), initial_values=(0,0,0.95,0.5), ksc_scale=1, plot=False)
+        stoch_vol['stoch_vol_obs_innov'][i-1] = simulated_vol
+    ## end
+    ########
+    
+    trace_phi.append(phi)
+    trace_stoch_vol.append(stoch_vol)
+    
+    
 
 ###### unit test #######
 def test_derive_ar_diff_y_minus_intercept():
