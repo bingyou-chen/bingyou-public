@@ -348,7 +348,7 @@ def estimate_stoch_vol(endog, random_state, params=(100,50,1,None), initial_valu
     
     simulated_states = trace_states[trace_selected]
     
-    return np.exp(simulated_states/2)
+    return np.exp(simulated_states/2), (trace_mixing[trace_selected], trace_mu[trace_selected][0], trace_phi[trace_selected][0], trace_sigma2[trace_selected][0])
     
     
 
