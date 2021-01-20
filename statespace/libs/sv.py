@@ -245,7 +245,7 @@ def draw_posterior_mu(model, states, phi, sigma2):
 
     
 
-def estimate_stoch_vol(endog, random_state, params=(100,50,1,None), initial_values=(0,0,0.95,0.5), ksc_scale=1, plot=False):    
+def estimate_stoch_vol(endog, random_state, control=(100,50,1,None), initial_values=(0,0,0.95,0.5), ksc_scale=1, plot=False):    
     """
     Parameters
     ----------
@@ -253,7 +253,7 @@ def estimate_stoch_vol(endog, random_state, params=(100,50,1,None), initial_valu
         DESCRIPTION.
     random_state : TYPE
         e.g. random_state = np.random.RandomState(10)
-    params : TYPE, optional
+    control : TYPE, optional
         (n_iterations, burn, thin, trace selected as simulated output(when it is None, choose a random one after burned traces)). The default is (100,50,1,None).
     initial_values : TYPE, optional
         (selection of ksc distribution, mu(state mean), phi(state auto-regressive coefficient), sigma2(state variance)). The default is (0,0,0.95,0.5).
@@ -270,10 +270,10 @@ def estimate_stoch_vol(endog, random_state, params=(100,50,1,None), initial_valu
     """
     
     # Simulation parameters
-    n_iterations = params[0]
-    burn = params[1]
-    thin = params[2]
-    trace_selected = params[3]
+    n_iterations = control[0]
+    burn = control[1]
+    thin = control[2]
+    trace_selected = control[3]
     
     # q_i, m_i, v_i^2
     ksc_params = np.array([[0.04395, 2.77786,   0.16735],

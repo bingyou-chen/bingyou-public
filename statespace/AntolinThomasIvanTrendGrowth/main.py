@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 import copy
-# import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt
 
 # from statsmodels.tsa.statespace.tools import (
 #     constrain_stationary_univariate, unconstrain_stationary_univariate)
@@ -99,6 +99,29 @@ class ATITG(sm.tsa.statespace.MLEModel):
         self['state_cov'] = self.get_state_cov(phi['param_var_trend'], stoch_vol, k_states) 
         
 
+    def clone(self, endog, exog=None, **kwargs):
+        k_states = kwargs['k_states']
+        phi = kwargs['phi']
+        stoch_vol = kwargs['stoch_vol']
+        # k_states = kwargs['k_states']
+        # k_states = kwargs['k_states']
+        
+        # Initialize the base model
+        super(ATITG, self).__init__(endog, 
+                                    k_states=k_states, # dimension of states
+                                    k_posdef=k_states  # dimension of state disturbances
+                                )
+        self.initialize_approximate_diffuse(variance=10**4) # X0 ∼ N(0, 104)
+        
+        self['design'] = self.get_design_matrix(phi)
+        self['transition'] = self.get_transition_matrix(phi)
+        self['selection'] = np.eye(k_states)
+        self['obs_cov'] = self.get_obs_cov(stoch_vol['stoch_vol_obs_innov'])
+        self['state_cov'] = self.get_state_cov(phi['param_var_trend'], stoch_vol, k_states) 
+        
+        pass
+        
+        
     
     def get_design_matrix(self, phi):
         H = [[1/3,2/3,1,2/3,1/3]*3]
@@ -212,14 +235,14 @@ class ATITG(sm.tsa.statespace.MLEModel):
     #                  params[1]**0.5, params[2:]]
 
     def update(self, params, **kwargs):
-        if ('phi' in kwargs) and ('stoch_vol' in kwargs): 
-            k_states, phi, stoch_vol = self.k_states, kwargs['phi'], kwargs['stoch_vol']
-            kwargs = {key:kwargs[key] for key in kwargs if key not in ['phi','stoch_vol']}      
-            self['design'] = self.get_design_matrix(phi)
-            self['transition'] = self.get_transition_matrix(phi)
-            self['selection'] = np.eye(k_states)
-            self['obs_cov'] = self.get_obs_cov(stoch_vol['stoch_vol_obs_innov'])
-            self['state_cov'] = self.get_state_cov(phi['param_var_trend'], stoch_vol, k_states) 
+        # if ('phi' in kwargs) and ('stoch_vol' in kwargs): 
+        #     k_states, phi, stoch_vol = self.k_states, kwargs['phi'], kwargs['stoch_vol']
+        #     kwargs = {key:kwargs[key] for key in kwargs if key not in ['phi','stoch_vol']}      
+        #     self['design'] = self.get_design_matrix(phi)
+        #     self['transition'] = self.get_transition_matrix(phi)
+        #     self['selection'] = np.eye(k_states)
+        #     self['obs_cov'] = self.get_obs_cov(stoch_vol['stoch_vol_obs_innov'])
+        #     self['state_cov'] = self.get_state_cov(phi['param_var_trend'], stoch_vol, k_states) 
 
         super(ATITG, self).update(params, **kwargs)
         
@@ -227,12 +250,11 @@ class ATITG(sm.tsa.statespace.MLEModel):
 
 ####################################################################################################        
 
-RNG = np.random.RandomState(10) # deterministic random data
-
 ########
 ## Loading Data
 # expect: first col is official Quarterly GDP; remainly columns are detrended monthly indicators
 def get_dummy_us_growth_endog(n=30, obs_innov_params=(0.5, 5), trend_mav_periods=120, cycle_mav_periods=9):
+    RNG = np.random.RandomState(10) # deterministic random data
     raw_data = pd.read_csv(r'local/raw_us_gdp.csv',index_col=0).set_index('DATE')
     raw_data.index = raw_data.index.map(pd.Timestamp)
     raw_data = raw_data.resample('Q').last()
@@ -260,6 +282,8 @@ def get_dummy_us_growth_endog(n=30, obs_innov_params=(0.5, 5), trend_mav_periods
     data_observation = data_observation.drop(['y'],axis=1)
     data_observation = y_q.join(data_observation,how='outer')
     
+    # for i in range(10):
+    #     data_observation.iloc[i*3:i*3+1,i+10] = None
     return data_observation
 
 data_observation = get_dummy_us_growth_endog()
@@ -268,6 +292,12 @@ data_index = data_observation.index
 data_columns = data_observation.columns
 ## end
 ########
+
+
+
+RNG = np.random.RandomState(10) # deterministic random data
+n_iterations = 10
+
 
 #######
 #### C.2.0 Initialization
@@ -305,7 +335,7 @@ stoch_vol=dict(
 #             obj[key] = obj.astype('float')
     
 
-n_iterations = 100
+
 trace_phi, trace_stoch_vol, trace_states = [phi], [stoch_vol], [] 
 for s in range(1, n_iterations):
     print('start iterations {}'.format(s))
@@ -433,7 +463,7 @@ for s in range(1, n_iterations):
     Y = states[5,:]
     beta = phi['param_cycle_ar_betas']
     errors = Y - X.dot(beta)
-    simulated_vol, params = estimate_stoch_vol(errors, RNG,params=(2,1,1,1), initial_values=trace_stoch_vol[s-1]['stoch_vol_cycle_param'], ksc_scale=1, plot=False)
+    simulated_vol, params = estimate_stoch_vol(errors, RNG,control=(2,1,1,1), initial_values=trace_stoch_vol[s-1]['stoch_vol_cycle_param'], ksc_scale=1, plot=False)
     stoch_vol['stoch_vol_cycle'] = simulated_vol
     stoch_vol['stoch_vol_cycle_param'] = params
     
@@ -442,7 +472,7 @@ for s in range(1, n_iterations):
     Y = states[10,:]
     beta = phi['param_innov1_ar_betas']
     errors = Y - X.dot(beta)
-    simulated_vol, params = estimate_stoch_vol(errors, RNG,params=(2,1,1,1), initial_values=trace_stoch_vol[s-1]['stoch_vol_innov_param'], ksc_scale=1, plot=False)
+    simulated_vol, params = estimate_stoch_vol(errors, RNG,control=(2,1,1,1), initial_values=trace_stoch_vol[s-1]['stoch_vol_innov_param'], ksc_scale=1, plot=False)
     stoch_vol['stoch_vol_innov'] = simulated_vol
     stoch_vol['stoch_vol_innov_param'] = params
     
@@ -461,17 +491,85 @@ for s in range(1, n_iterations):
         # beta = phi['param_innov_ar_betas'][i-1]
         # errors = Y - X.dot(beta)
         errors = errors_matrix[:,i-1]
-        simulated_vol, params = estimate_stoch_vol(errors, RNG, params=(2,1,1,1), initial_values=trace_stoch_vol[s-1]['stoch_vol_obs_innov_param'][i-1], ksc_scale=1, plot=False)
+        simulated_vol, params = estimate_stoch_vol(errors, RNG, control=(2,1,1,1), initial_values=trace_stoch_vol[s-1]['stoch_vol_obs_innov_param'][i-1], ksc_scale=1, plot=False)
         #simulated_vol = np.append([simulated_vol[0]]*OBS_INITIAL_AR_BURN, simulated_vol)
         stoch_vol['stoch_vol_obs_innov'][i-1] = simulated_vol
         stoch_vol['stoch_vol_obs_innov_param'][i-1] = params
     ## end
     ########
-    
     trace_phi.append(phi)
     trace_stoch_vol.append(stoch_vol)
     
+
+########
+## C.3.1 get the best estimates of model parameter and the the final model
+
+## get phi estimate
+phi_estimated = {}
+phi_sample = {}
+df = pd.DataFrame(trace_phi)
+
+for col in df.columns:
+    if col != 'param_innov_ar_betas':
+        df_temp = pd.DataFrame(df[col].tolist())
+        phi_estimated[col] = df_temp.median().values
+        phi_sample[col] = df_temp
+
+col = 'param_innov_ar_betas'
+phi_estimated[col] = []
+phi_sample[col] = []
+for i in range(len(df[col][0])):
+    df_sub = df[[col]].applymap(lambda x: x[i])
+    df_temp = pd.DataFrame(df_sub[col].tolist())
+    phi_estimated[col].append(df_temp.median().values)
+    phi_sample[col].append(df_temp)
+
+
+
+## get stoch_vol estimate
+
+# remove ksc distribution random selection from params
+for stoch_vol in trace_stoch_vol:
+    params_list = stoch_vol['stoch_vol_obs_innov_param']
+    params_list_clean = []
+    for params in params_list:
+        params_list_clean.append(params[1:])    
+    stoch_vol['stoch_vol_obs_innov_param'] = params_list_clean
     
+    params = stoch_vol['stoch_vol_innov_param']        
+    stoch_vol['stoch_vol_innov_param'] = params[1:]
+    
+    params = stoch_vol['stoch_vol_cycle_param']        
+    stoch_vol['stoch_vol_cycle_param'] = params[1:]
+##
+
+stoch_vol_estimated = {}
+stoch_vol_sample = {}
+df = pd.DataFrame(trace_stoch_vol)
+
+for col in ['stoch_vol_cycle', 'stoch_vol_cycle_param', 'stoch_vol_innov', 'stoch_vol_innov_param']:
+    if col != 'param_innov_ar_betas':
+        df_temp = pd.DataFrame(df[col].tolist())
+        stoch_vol_estimated[col] = df_temp.median().values
+        stoch_vol_sample[col] = df_temp
+        
+# pd.Series(stoch_vol_estimated['stoch_vol_innov']).plot()
+
+for col in ['stoch_vol_obs_innov', 'stoch_vol_obs_innov_param']:
+    stoch_vol_estimated[col] = []
+    stoch_vol_sample[col] = []
+    for i in range(len(df[col][0])):
+        df_sub = df[[col]].applymap(lambda x: x[i])
+        df_temp = pd.DataFrame(df_sub[col].tolist())
+        stoch_vol_estimated[col].append(df_temp.median().values)
+        stoch_vol_sample[col].append(df_temp)
+
+atitg_model = ATITG(endog, phi_estimated, stoch_vol_estimated)
+
+
+## end
+#######
+
 def get_param_trace(traces, key):
     rs = []
     for i in range(len(traces)):
@@ -480,11 +578,77 @@ def get_param_trace(traces, key):
     return rs
 
 
+### ploting results
 trace = get_param_trace(trace_phi, 'param_cycle_ar_betas')
 pd.DataFrame(trace).plot(title='param_cycle_ar_betas')
 
 trace = get_param_trace(trace_stoch_vol, 'stoch_vol_cycle_param')
 pd.DataFrame(trace).iloc[:,1:].plot(title='stoch_vol_cycle_param')
+#####
+
+
+# Plan
+"""
+1. construct the best model using estimated parameters
+2. from monthly full-sample to daily point-in-time model
+3. surprise
+"""
+#
+
+### use best estimated parameters to construct the model ###
+
+
+### end
+
+
+### compute model built-in parameters
+results = atitg_model.filter([])
+
+results = atitg_model.filter([])
+
+# filtered states
+results.states.filtered 
+
+# filtered covariance
+results.states.filtered_cov 
+
+# impulse response
+results.impulse_responses(10,[0.1]*15).plot() # 10 forward steps, innovation of 0.1 for all 15 state variables
+
+
+# In-sample prediction and out-of-sample forecasting
+# https://www.statsmodels.org/stable/generated/statsmodels.tsa.statespace.mlemodel.MLEResults.predict.html#statsmodels.tsa.statespace.mlemodel.MLEResults.predict
+
+#need to provide kwargs if parameters are time-varing 
+# https://www.statsmodels.org/stable/generated/statsmodels.tsa.statespace.kalman_filter.FilterResults.predict.html?highlight=filterresults%20predict#statsmodels.tsa.statespace.kalman_filter.FilterResults.predict
+
+transition = results.filter_results.transition
+design = results.filter_results.design
+obs_cov = results.filter_results.obs_cov
+state_cov = results.filter_results.state_cov
+results = atitg_model.filter([])
+#df = results.predict(start=0,end=246, transition=transition, design=design, obs_cov=obs_cov, state_cov = state_cov)
+df = results.predict(start=0,end=246)
+endog1= endog.copy()
+endog1.iloc[-2:] = None
+endog1[['y1']].join(df['y1'],rsuffix='predicted').plot()
+
+
+atitg_model_old = ATITG(endog1, phi_estimated, stoch_vol_estimated)
+results_old = atitg_model_old.smooth([])
+results = atitg_model.smooth([])
+
+print('ahahahhaahahah')
+news = results_old.news(results, impact_date = '2020-08-31',
+                                k_states = 15,
+                                phi = phi,
+                                stoch_vol = stoch_vol)
+details = news.details_by_impact
+print(details.tail())
+#####
+
+
+
 
 
 
